@@ -1,14 +1,20 @@
 """
-tools.py  --  the three "hands" the agent uses to interact with the world.
+tools.py  --  the "hands" the agents use to interact with the world.
 
-This file is COMPLETE. These are the only things the agent is allowed to do:
+This file is COMPLETE. These are the only things the agents are allowed to do:
 
-    list_files(root)             -> list every .py file under a folder
-    read_file(root, path)        -> read a file's contents, with line numbers
-    send_request(method, path, data) -> make an HTTP request to the LOCAL app
+    list_files(scan_dir, root)            -> list every .py file under a folder
+    read_file(scan_dir, path)             -> read a file's contents, with line numbers
+    write_file(scan_dir, path, contents)  -> write a file INSIDE the scan directory
+    send_request(method, path, data)      -> make an HTTP request to the LOCAL app
 
-Each function has safety checks so the agent can only look inside the project
-and can only talk to the practice app on localhost.
+The first argument of the file tools, `scan_dir`, is the HARD BOUNDARY the
+agent was launched with (from the command line). Every file path is resolved
+INSIDE that directory and refused if it escapes -- so even if the model asks
+for ".." or "/etc/passwd", it cannot read, walk, or write outside the folder
+it was given. As a second safety layer we also confirm the path stays inside
+the repo root. The HTTP tool can only ever talk to the practice app on
+localhost.
 """
 
 import os
@@ -22,7 +28,7 @@ TARGET_HOST = "http://127.0.0.1:5000"
 
 # The repo root: the folder ABOVE this agent/ folder. This file lives at
 # <repo>/agent/tools.py, so going up two levels from __file__ gives <repo>.
-# The agent is only ever allowed to look at code inside here.
+# This is the SECOND safety layer -- nothing may ever escape the repo.
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Folders we never want to list -- virtual environments, caches, git internals,
@@ -31,26 +37,53 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKIP_DIRS = {".venv", "venv", "__pycache__", ".git", "node_modules"}
 
 
-def list_files(root="."):
+def _boundary(scan_dir):
+    """Return the absolute path of the scan directory (the hard boundary)."""
+    return os.path.abspath(os.path.join(BASE, scan_dir))
+
+
+def _resolve(scan_dir, requested):
+    """
+    Resolve `requested` INSIDE the scan directory and enforce both boundaries.
+
+    Returns a tuple (target_abspath, error). On success `error` is None. If the
+    resolved path escapes the scan directory (primary boundary) or the repo
+    root (second safety layer), `target_abspath` is None and `error` is a
+    clear message to hand back to the model.
+    """
+    boundary = _boundary(scan_dir)
+    target = os.path.abspath(os.path.join(boundary, requested))
+
+    # Primary boundary: the path must stay inside the scan directory we were
+    # given. This is what stops ".." / "." / absolute paths from escaping.
+    if os.path.commonpath([boundary, target]) != boundary:
+        return None, "ERROR: outside the allowed scan directory"
+
+    # Second safety layer: it must ALSO stay inside the repo root.
+    if os.path.commonpath([BASE, target]) != BASE:
+        return None, "ERROR: that path is outside the repo. Not allowed."
+
+    return target, None
+
+
+def list_files(scan_dir, root="."):
     """
     Return a sorted list of all .py files under `root` (searched recursively).
 
-    `root` is resolved RELATIVE TO the repo root (BASE), and the result must
-    stay inside BASE. If it points outside the repo (e.g. "../.."), we refuse
-    and return an error string instead of walking it.
-
-    Paths are returned relative to the repo root so they are short and easy to
-    read, e.g. "target_app/app.py".
+    `root` is resolved INSIDE `scan_dir` (the hard boundary). Anything that
+    escapes the scan directory is refused with an error string instead of being
+    walked. Paths are returned relative to the scan directory so they are short
+    and easy to read, e.g. "app.py".
     """
-    target = os.path.abspath(os.path.join(BASE, root))
+    target, err = _resolve(scan_dir, root)
+    if err:
+        return err
 
-    # os.path.commonpath lets us confirm `target` really lives inside BASE.
-    if os.path.commonpath([BASE, target]) != BASE:
-        return "ERROR: that folder is outside the repo. Not allowed."
+    boundary = _boundary(scan_dir)
 
     # Debug: show exactly which absolute directory we are about to scan, so you
-    # can see the agent is staying inside the project (and not wandering into
-    # parent folders, .venv, or other repos).
+    # can see the agent is staying inside the folder it was given (and not
+    # wandering into parent folders, .venv, or other repos).
     print("[list_files] walking: " + target)
 
     found = []
@@ -60,24 +93,20 @@ def list_files(root="."):
         for name in filenames:
             if name.endswith(".py"):
                 full = os.path.join(dirpath, name)
-                found.append(os.path.relpath(full, BASE))
+                found.append(os.path.relpath(full, boundary))
     return sorted(found)
 
 
-def read_file(root, path):
+def read_file(scan_dir, path):
     """
     Return the contents of a file, with a line number on each line.
 
-    Safety: `path` is joined onto `root` and we then confirm the final location
-    is still INSIDE `root`. This blocks tricks like "../../etc/passwd" that try
-    to escape the project folder.
+    `path` is resolved INSIDE `scan_dir` (the hard boundary). This blocks tricks
+    like "../../etc/passwd" or absolute paths that try to escape the folder.
     """
-    root = os.path.abspath(root)
-    target = os.path.abspath(os.path.join(root, path))
-
-    # os.path.commonpath lets us check that `target` really lives under `root`.
-    if os.path.commonpath([root, target]) != root:
-        return "ERROR: that path is outside the project folder. Not allowed."
+    target, err = _resolve(scan_dir, path)
+    if err:
+        return err
 
     if not os.path.isfile(target):
         return "ERROR: no such file: " + path
@@ -90,6 +119,33 @@ def read_file(root, path):
     for i, line in enumerate(lines, start=1):
         numbered.append(str(i).rjust(4) + ": " + line.rstrip("\n"))
     return "\n".join(numbered)
+
+
+def write_file(scan_dir, path, contents):
+    """
+    Write `contents` to a file resolved INSIDE `scan_dir` (the hard boundary).
+
+    Writing is restricted to the scan directory: anything that escapes it (or
+    the repo root) is refused. On success it prints the absolute path written
+    and returns a short confirmation string.
+    """
+    target, err = _resolve(scan_dir, path)
+    if err:
+        return err
+
+    # Make sure the parent folder exists (it will always be inside the
+    # boundary, since `target` itself passed the boundary check above).
+    parent = os.path.dirname(target)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(contents)
+
+    print("[write_file] wrote: " + target)
+    return "Wrote " + str(len(contents)) + " characters to " + os.path.relpath(
+        target, _boundary(scan_dir)
+    )
 
 
 def send_request(method, path, data=None):

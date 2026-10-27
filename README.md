@@ -100,8 +100,9 @@ changes are needed).
 > ⏱️ The free tier has **per-minute rate limits**. If you see a "rate limit"
 > or `429` error, just wait a minute and run the agent again.
 
-> 🤖 The free model is `gemini-3.8-flash`. If it's ever unavailable, pick
-> another Gemini Flash model listed as free at
+> 🤖 The default free model is `gemini-3.5-flash-lite`. If it's ever
+> unavailable, a good backup is `gemini-3.8-flash`, or pick another Gemini
+> Flash model listed as free at
 > [ai.google.dev/pricing](https://ai.google.dev/pricing) and put its name in
 > `LLM_MODEL`.
 
@@ -167,6 +168,40 @@ a report naming the precise file and line number of a SQL injection, e.g.
 Complete **TODO #3** so that, before finishing, the agent uses `send_request`
 to actually attack the running app — for example logging in with a payload like
 `' OR '1'='1` — and checks the response to prove the injection really works.
+
+---
+
+## Build the defense agent (red team → blue team)
+
+Once the attack agent can find the bug, build the **defense agent** to fix it.
+Open **`agent/defense_agent.py`** and fill in its two `TODO`s (the system prompt,
+and the confirm-the-fix step). Its tools are just `read_file` and `write_file`.
+
+The goal: it reads the vulnerable file, rewrites the unsafe SQL using
+**parameterized queries** (the `?` placeholder style already in `seed_database`),
+and writes the corrected code to a **new** file `target_app/app_fixed.py`. It
+must **not** overwrite `app.py`.
+
+Run it from the repo root (same CLI as the attack agent — the directory is a
+hard boundary; it can only read/write inside it):
+
+```bash
+python agent/defense_agent.py
+```
+
+**Close the loop** — prove the fix actually works:
+
+1. Stop the vulnerable app (Ctrl-C in Terminal 1).
+2. Run the fixed app instead:
+   ```bash
+   python target_app/app_fixed.py
+   ```
+3. In Terminal 2, run the attack agent again:
+   ```bash
+   python agent/attack_agent.py
+   ```
+   The `' OR '1'='1` login bypass should now **fail** (HTTP 401) — the
+   parameterized query treats the payload as literal text, not SQL.
 
 ---
 

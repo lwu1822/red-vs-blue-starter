@@ -50,6 +50,10 @@ DEFAULT_SCAN_DIR = "target_app"
 #         - Reply with EXACTLY ONE JSON object and nothing else (no markdown,
 #           no backticks, no explanation around it). Our parser reads one
 #           action per turn.
+#         - It MUST include this exact sentence (the scan directory is a hard
+#           boundary, also enforced in code):
+#             "You may only look inside the directory you were given. Do not
+#              try to access parent folders or other directories."
 #   * TODO #2: it must report the EXACT file and line number of the bug.
 #   * TODO #3: before finishing, it must CONFIRM the bug by sending a real
 #     request to the local app (e.g. an " ' OR '1'='1 " style login) and
@@ -63,12 +67,13 @@ reporting the exact file + line, and confirming the exploit live).
 """
 
 
-def run_tool(action, scan_root):
+def run_tool(action, scan_dir):
     """
     Look at the parsed JSON `action` and run the matching tool.
 
-    `scan_root` is the directory chosen on the command line; it's used as the
-    default folder when the model doesn't specify one in its action.
+    `scan_dir` is the directory chosen on the command line. It is passed into
+    every file tool as the HARD BOUNDARY, so the model can only ever read or
+    walk inside it -- even if it asks for ".." or "." or an absolute path.
 
     Returns a string describing the result, which we hand back to the model.
     This part is DONE -- it simply connects the model's chosen action to the
@@ -77,18 +82,17 @@ def run_tool(action, scan_root):
     name = action.get("action")
 
     if name == "list_files":
-        root = action.get("root", scan_root)
-        files = tools.list_files(root)
+        # The model may name a sub-folder with "root"; it defaults to "." (the
+        # scan directory itself). Either way it stays inside scan_dir.
+        files = tools.list_files(scan_dir, action.get("root", "."))
         # list_files returns a list on success, or an error STRING if the path
-        # is outside the repo. Pass the error through as-is in that case.
+        # is outside the scan directory. Pass the error through as-is.
         if isinstance(files, str):
             return files
         return "Files found:\n" + "\n".join(files)
 
     if name == "read_file":
-        root = action.get("root", scan_root)
-        path = action.get("path", "")
-        return tools.read_file(root, path)
+        return tools.read_file(scan_dir, action.get("path", ""))
 
     if name == "send_request":
         result = tools.send_request(

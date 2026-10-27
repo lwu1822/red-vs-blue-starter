@@ -8,7 +8,7 @@ the model's text reply.
 It reads three settings from your environment (loaded from the .env file):
     LLM_API_KEY   -- your secret API key
     LLM_BASE_URL  -- the API endpoint (OpenAI-compatible)
-    LLM_MODEL     -- which model to use, e.g. gemini-3.8-flash
+    LLM_MODEL     -- which model to use, e.g. gemini-3.5-flash-lite
 """
 
 import os
@@ -26,7 +26,7 @@ _client = OpenAI(
 )
 
 # Remember which model we were told to use.
-_model = os.environ.get("LLM_MODEL", "gemini-3.8-flash")
+_model = os.environ.get("LLM_MODEL", "gemini-3.5-flash-lite")
 
 
 def chat(messages):
@@ -48,4 +48,6 @@ def chat(messages):
         # learning because the agent behaves more predictably.
         temperature=0,
     )
-    return response.choices[0].message.content
+    # The model can occasionally return no text (e.g. an empty or filtered
+    # response). Coerce that to "" so callers always get a string to work with.
+    return response.choices[0].message.content or ""
